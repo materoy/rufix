@@ -9,11 +9,23 @@ pub mod vs {
 
             layout(location = 0) out vec3 out_color;
 
+            layout(set = 0, binding = 0) uniform MVP_Data {
+                mat4 world;
+                mat4 view;
+                mat4 projection;
+            } uniforms;
+
             void main() {
-                gl_Position = vec4(position, 1.0);
+                mat4 worldview = uniforms.view * uniforms.world;
+                gl_Position = uniforms.projection * worldview * vec4(position, 1.0);
                 out_color = color;
             }
-            "
+            ",
+            types_meta: {
+                use bytemuck::{Pod, Zeroable};
+
+                #[derive(Clone, Copy, Zeroable, Pod)]
+            }
     }
 }
 

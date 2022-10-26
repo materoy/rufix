@@ -11,14 +11,14 @@ pub struct Vertex {
 vulkano::impl_vertex!(Vertex, position, color);
 
 #[derive(Debug, Clone)]
-struct MVP {
-    model: TMat4<f32>,
-    view: TMat4<f32>,
-    projection: TMat4<f32>,
+pub struct MVP {
+    pub model: TMat4<f32>,
+    pub view: TMat4<f32>,
+    pub projection: TMat4<f32>,
 }
 
 impl MVP {
-    fn new() -> MVP {
+    pub fn new() -> MVP {
         MVP {
             model: identity(),
             view: identity(),
