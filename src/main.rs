@@ -9,10 +9,7 @@ use shaders::vs;
 use vertex::MVP;
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess},
-    command_buffer::{
-        AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassContents,
-    },
-    descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet},
+    command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents},
     device::{
         physical::{PhysicalDevice, PhysicalDeviceType},
         Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo,
@@ -31,11 +28,9 @@ use vulkano::{
         GraphicsPipeline, Pipeline,
     },
     render_pass::{self, Framebuffer, RenderPass, Subpass},
-    swapchain::{
-        self, AcquireError, PresentInfo, Swapchain, SwapchainCreateInfo, SwapchainCreationError,
-    },
+    swapchain::{self, AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError},
     sync::{FlushError, GpuFuture},
-    Version, VulkanLibrary,
+    Version,
 };
 use vulkano_win::VkSurfaceBuild;
 use winit::{
@@ -49,16 +44,12 @@ mod vertex;
 
 fn main() {
     let instance = {
-        let library = VulkanLibrary::new().unwrap();
-        let extensions = vulkano_win::required_extensions(&library);
-        Instance::new(
-            library,
-            InstanceCreateInfo {
-                enabled_extensions: extensions,
-                max_api_version: Some(Version::V1_1),
-                ..Default::default()
-            },
-        )
+        let extensions = vulkano_win::required_extensions();
+        Instance::new(InstanceCreateInfo {
+            enabled_extensions: extensions,
+            max_api_version: Some(Version::V1_1),
+            ..Default::default()
+        })
         .unwrap_or_else(|e| {
             panic!("Error creating an instance: {:?}", e);
         })
@@ -74,7 +65,7 @@ fn main() {
         ..DeviceExtensions::empty()
     };
 
-    let (physical_device, queue_family_index) = instance
+    let (physical_device, queue_family) = instance
         .enumerate_physical_devices()
         .unwrap()
         .filter(|p| p.supported_extensions().contains(&device_ext))
@@ -102,10 +93,7 @@ fn main() {
         physical_device.clone(),
         DeviceCreateInfo {
             enabled_extensions: device_ext,
-            queue_create_infos: vec![QueueCreateInfo {
-                queue_family_index,
-                ..Default::default()
-            }],
+            queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
             ..Default::default()
         },
     )
@@ -221,7 +209,15 @@ fn main() {
                 recreate_swapchain = false
             }
 
-            let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
+            let vs = shaders::vs::load(device.clone()).unwrap();
+            let fs = shaders::fs::load(device.clone()).unwrap();
+
+            let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+            let command_buffer_allocator =
+                StandardCommandBufferAllocator::new(device.clone(), Default::default());
+
+            let uniform_buffer =
+                CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(memory_allocator);
 
             let uniform_buffer_subbufer = {
                 let mut mvp = MVP::new();
@@ -259,9 +255,6 @@ fn main() {
                 uniform_buffer.from_data(uniform_data).unwrap()
             };
 
-            let vs = shaders::vs::load(device.clone()).unwrap();
-            let fs = shaders::fs::load(device.clone()).unwrap();
-
             let pipeline = GraphicsPipeline::start()
                 .vertex_input_state(BuffersDefinition::new().vertex::<vertex::Vertex>())
                 .vertex_shader(vs.entry_point("main").unwrap(), ())
@@ -298,7 +291,7 @@ fn main() {
             let clear_values = vec![Some([0.0, 0.68, 1.0, 1.0].into()), Some(1f32.into())];
 
             let vertex_buffer = CpuAccessibleBuffer::from_iter(
-                device.clone(),
+                &memory_allocator,
                 BufferUsage::empty(),
                 false,
                 [
@@ -335,7 +328,7 @@ fn main() {
 
             let mut cmd_buffer_builder = AutoCommandBufferBuilder::primary(
                 device.clone(),
-                queue_family_index,
+                queue.queue_family_index(),
                 CommandBufferUsage::OneTimeSubmit,
             )
             .unwrap();
@@ -401,7 +394,7 @@ fn main() {
 }
 
 fn window_size_dependent_setup(
-    images: &[Arc<SwapchainImage<Window>>],
+    images: &[Arc<SwapchainImage>],
     render_pass: Arc<RenderPass>,
     viewport: &mut Viewport,
     device: Arc<Device>,

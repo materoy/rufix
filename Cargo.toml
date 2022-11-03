@@ -7,9 +7,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.64"
-vulkano = "0.31.1"
-winit = "0.27.4"
-vulkano-win = "0.31.0"
-vulkano-shaders = "0.31.1"
-bytemuck = "1.12.1"
-nalgebra-glm = "0.17.0"
+vulkano = "0.29.0"
+vulkano-win = "0.29.0"
+vulkano-shaders = "0.29.0"
+winit = "0.26.0"
+bytemuck = { version = "1.7", features = ["derive", "extern_crate_std", "min_const_generics"] }
+nalgebra-glm = "0.16.0"
