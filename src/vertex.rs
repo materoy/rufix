@@ -4,10 +4,10 @@ use bytemuck::{Pod, Zeroable};
 #[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
 pub struct Vertex {
     pub position: [f32; 3],
-    // pub color: [f32; 3],
+    pub color: [f32; 3],
 }
 
-vulkano::impl_vertex!(Vertex, position);
+vulkano::impl_vertex!(Vertex, position, color);
 
 // #[derive(Debug, Clone)]
 // pub struct MVP {

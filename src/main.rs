@@ -1,14 +1,22 @@
 use std::sync::Arc;
 
 use vulkano::{
+    buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess},
     command_buffer::AutoCommandBufferBuilder,
     device::{
         physical::PhysicalDevice, Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo,
     },
     image::{view::ImageView, ImageAccess, SwapchainImage},
     instance::{Instance, InstanceCreateInfo},
-    pipeline::graphics::viewport::Viewport,
-    render_pass::{Framebuffer, RenderPass},
+    pipeline::{
+        graphics::{
+            input_assembly::InputAssemblyState,
+            vertex_input::BuffersDefinition,
+            viewport::{Viewport, ViewportState},
+        },
+        GraphicsPipeline,
+    },
+    render_pass::{Framebuffer, RenderPass, Subpass},
     swapchain::{self, AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError},
     sync::{self, FlushError, GpuFuture},
     Version,
@@ -19,6 +27,8 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+
+use crate::vertex::Vertex;
 
 extern crate vulkano;
 extern crate vulkano_win;
@@ -136,6 +146,38 @@ fn main() {
     .unwrap();
 
     // pipeline
+    let pipeline = GraphicsPipeline::start()
+        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .build(device.clone())
+        .unwrap();
+
+    let vertex_buffer = CpuAccessibleBuffer::from_iter(
+        device.clone(),
+        BufferUsage::all(),
+        false,
+        [
+            Vertex {
+                position: [-0.5, 0.5, 0.0],
+                color: [1.0, 0.0, 0.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, 0.0],
+                color: [0.0, 1.0, 0.0],
+            },
+            Vertex {
+                position: [0.0, -0.5, 0.0],
+                color: [0.0, 0.0, 1.0],
+            },
+        ]
+        .iter()
+        .cloned(),
+    )
+    .unwrap();
 
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -215,6 +257,11 @@ fn main() {
                     vulkano::command_buffer::SubpassContents::Inline,
                     clear_values,
                 )
+                .unwrap()
+                .set_viewport(0, [viewport.clone()])
+                .bind_pipeline_graphics(pipeline.clone())
+                .bind_vertex_buffers(0, vertex_buffer.clone())
+                .draw(vertex_buffer.len() as u32, 1, 0, 0)
                 .unwrap()
                 .end_render_pass()
                 .unwrap();
