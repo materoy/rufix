@@ -5,10 +5,11 @@ use nalgebra_glm::{identity, TMat4};
 #[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
 pub struct Vertex {
     pub position: [f32; 3],
+    pub normal: [f32; 3],
     pub color: [f32; 3],
 }
 
-vulkano::impl_vertex!(Vertex, position, color);
+vulkano::impl_vertex!(Vertex, position, normal, color);
 
 #[derive(Debug, Clone)]
 pub struct MVP {
@@ -25,4 +26,16 @@ impl MVP {
             projection: identity(),
         }
     }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct AmbientLight {
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct DirectionalLight {
+    pub position: [f32; 4],
+    pub color: [f32; 3],
 }
