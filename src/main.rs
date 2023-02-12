@@ -4,6 +4,11 @@ use nalgebra_glm::{
     identity, look_at, perspective, pi, rotate_normalized_axis, translate, vec3, TMat4,
 };
 use vertex::Vertex;
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::command_buffer::RenderPassBeginInfo;
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::memory::allocator::{GenericMemoryAllocator, StandardMemoryAllocator};
+use vulkano::swapchain::SwapchainPresentInfo;
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess},
     command_buffer::AutoCommandBufferBuilder,
@@ -27,7 +32,7 @@ use vulkano::{
     render_pass::{Framebuffer, RenderPass, Subpass},
     swapchain::{self, AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError},
     sync::{self, FlushError, GpuFuture},
-    Version,
+    Version, VulkanLibrary,
 };
 use vulkano_win::VkSurfaceBuild;
 use winit::{
@@ -50,12 +55,16 @@ mod vertex;
 
 fn main() {
     let instance = {
-        let extensions = vulkano_win::required_extensions();
-        Instance::new(InstanceCreateInfo {
-            enabled_extensions: extensions,
-            max_api_version: Some(Version::V1_1),
-            ..Default::default()
-        })
+        let vulkan_library = VulkanLibrary::new().unwrap();
+        let extensions = vulkano_win::required_extensions(&vulkan_library);
+        Instance::new(
+            vulkan_library,
+            InstanceCreateInfo {
+                enabled_extensions: extensions,
+                max_api_version: Some(Version::V1_1),
+                ..Default::default()
+            },
+        )
         .unwrap()
     };
 
@@ -66,15 +75,21 @@ fn main() {
 
     let device_extensions = DeviceExtensions {
         khr_swapchain: true,
-        ..DeviceExtensions::none()
+        ..DeviceExtensions::empty()
     };
 
-    let (physical_device, queue_family) = PhysicalDevice::enumerate(&instance)
-        .filter(|&p| p.supported_extensions().is_superset_of(&device_extensions))
+    let (physical_device, queue_family_index) = instance
+        .enumerate_physical_devices()
+        .unwrap()
+        .filter(|p| p.supported_extensions().contains(&device_extensions))
         .filter_map(|p| {
-            p.queue_families()
-                .find(|&q| q.supports_graphics() && q.supports_surface(&surface).unwrap_or(false))
-                .map(|q| (p, q))
+            p.queue_family_properties()
+                .iter()
+                .enumerate()
+                .position(|(i, q)| {
+                    q.queue_flags.graphics && p.surface_support(i as u32, &surface).unwrap_or(false)
+                })
+                .map(|i| (p, i as u32))
         })
         .min_by_key(|(p, _)| match p.properties().device_type {
             vulkano::device::physical::PhysicalDeviceType::DiscreteGpu => 0,
@@ -82,8 +97,10 @@ fn main() {
             vulkano::device::physical::PhysicalDeviceType::VirtualGpu => 2,
             vulkano::device::physical::PhysicalDeviceType::Cpu => 3,
             vulkano::device::physical::PhysicalDeviceType::Other => 4,
+            _ => 5,
         })
-        .unwrap();
+        .expect("no device available");
+
     println!(
         "Using device: {} (type: {:?})",
         physical_device.properties().device_name,
@@ -95,12 +112,13 @@ fn main() {
     );
 
     let (device, mut queues) = Device::new(
-        physical_device,
+        physical_device.clone(),
         DeviceCreateInfo {
-            enabled_extensions: physical_device
-                .required_extensions()
-                .union(&device_extensions),
-            queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
+            enabled_extensions: device_extensions,
+            queue_create_infos: vec![QueueCreateInfo {
+                queue_family_index,
+                ..Default::default()
+            }],
             ..Default::default()
         },
     )
@@ -109,7 +127,8 @@ fn main() {
     let queue = queues.next().unwrap();
 
     let (mut swapchain, images) = {
-        let caps = physical_device
+        let caps = device
+            .physical_device()
             .surface_capabilities(&surface, Default::default())
             .unwrap();
         let usage = caps.supported_usage_flags;
@@ -121,13 +140,16 @@ fn main() {
                 .0,
         );
 
+        let window = surface.object().unwrap().downcast_ref::<Window>().unwrap();
+        let image_extent = window.inner_size().into();
+
         Swapchain::new(
             device.clone(),
             surface.clone(),
             SwapchainCreateInfo {
                 min_image_count: caps.min_image_count,
                 image_format,
-                image_extent: surface.window().inner_size().into(),
+                image_extent,
                 image_usage: usage,
                 composite_alpha: alpha,
                 ..Default::default()
@@ -136,8 +158,13 @@ fn main() {
         .unwrap()
     };
 
-    let vs = shaders::vs::load(device.clone()).unwrap();
-    let fs = shaders::fs::load(device.clone()).unwrap();
+    let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+    let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(device.clone()));
+    let command_buffer_allocator =
+        StandardCommandBufferAllocator::new(device.clone(), Default::default());
+
+    let vs = vs::load(device.clone()).unwrap();
+    let fs = fs::load(device.clone()).unwrap();
 
     let render_pass = vulkano::single_pass_renderpass!(
         device.clone(),
@@ -175,14 +202,16 @@ fn main() {
         .build(device.clone())
         .unwrap();
 
-    let vertex_buffer = get_vertex_buffer(device.clone());
+    let vertex_buffer = get_vertex_buffer(memory_allocator.clone());
 
-    let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
+    let uniform_buffer =
+        CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(memory_allocator.clone());
 
-    let ambient_buffer = CpuBufferPool::<fs::ty::Ambient_Data>::uniform_buffer(device.clone());
+    let ambient_buffer =
+        CpuBufferPool::<fs::ty::Ambient_Data>::uniform_buffer(memory_allocator.clone());
 
     let directional_buffer =
-        CpuBufferPool::<fs::ty::Directional_Light_Data>::uniform_buffer(device.clone());
+        CpuBufferPool::<fs::ty::Directional_Light_Data>::uniform_buffer(memory_allocator.clone());
 
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -190,8 +219,12 @@ fn main() {
         depth_range: 0.0..1.0,
     };
 
-    let mut framebuffers =
-        window_size_dependent_setup(device.clone(), &images, render_pass.clone(), &mut viewport);
+    let mut framebuffers = window_size_dependent_setup(
+        &memory_allocator,
+        &images,
+        render_pass.clone(),
+        &mut viewport,
+    );
 
     let mut recreate_swapchain = false;
     let mut previous_frame_end = Some(Box::new(sync::now(device.clone())) as Box<dyn GpuFuture>);
@@ -233,7 +266,13 @@ fn main() {
 
             if recreate_swapchain {
                 let (new_swapchain, new_images) = match swapchain.recreate(SwapchainCreateInfo {
-                    image_extent: surface.window().inner_size().into(),
+                    image_extent: surface
+                        .object()
+                        .unwrap()
+                        .downcast_ref::<Window>()
+                        .unwrap()
+                        .inner_size()
+                        .into(),
                     ..swapchain.create_info()
                 }) {
                     Ok(r) => r,
@@ -243,7 +282,7 @@ fn main() {
 
                 swapchain = new_swapchain;
                 framebuffers = window_size_dependent_setup(
-                    device.clone(),
+                    &memory_allocator,
                     &new_images,
                     render_pass.clone(),
                     &mut viewport,
@@ -251,8 +290,14 @@ fn main() {
                 recreate_swapchain = false;
             }
 
-            let uniform_buffer_subbuffer = {
-                let dimensions: [u32; 2] = surface.window().inner_size().into();
+            let uniform_subbuffer = {
+                let dimensions: [u32; 2] = surface
+                    .object()
+                    .unwrap()
+                    .downcast_ref::<Window>()
+                    .unwrap()
+                    .inner_size()
+                    .into();
                 mvp.projection = perspective(
                     dimensions[0] as f32 / dimensions[1] as f32,
                     180.0,
@@ -293,7 +338,7 @@ fn main() {
                     projection: mvp.projection.into(),
                 };
 
-                uniform_buffer.next(uniform_data).unwrap()
+                uniform_buffer.from_data(uniform_data).unwrap()
             };
 
             let ambient_uniform_subbufer = {
@@ -302,7 +347,7 @@ fn main() {
                     intensity: ambient_light.intensity.into(),
                 };
 
-                ambient_buffer.next(uniform_data).unwrap()
+                ambient_buffer.from_data(uniform_data).unwrap()
             };
 
             let directional_uniform_subbuffer = {
@@ -311,21 +356,22 @@ fn main() {
                     color: directional_light.color.into(),
                 };
 
-                directional_buffer.next(uniform_data).unwrap()
+                directional_buffer.from_data(uniform_data).unwrap()
             };
 
             let layout = pipeline.layout().set_layouts().get(0).unwrap();
             let set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
                 layout.clone(),
                 [
-                    WriteDescriptorSet::buffer(0, uniform_buffer_subbuffer),
+                    WriteDescriptorSet::buffer(0, uniform_subbuffer),
                     WriteDescriptorSet::buffer(1, ambient_uniform_subbufer),
                     WriteDescriptorSet::buffer(2, directional_uniform_subbuffer),
                 ],
             )
             .unwrap();
 
-            let (image_num, suboptimal, acquire_future) =
+            let (image_index, suboptimal, acquire_future) =
                 match swapchain::acquire_next_image(swapchain.clone(), None) {
                     Ok(r) => r,
                     Err(AcquireError::OutOfDate) => {
@@ -339,20 +385,24 @@ fn main() {
                 recreate_swapchain = true;
             }
 
-            let clear_values = vec![[0.0, 0.0, 0.0, 1.0].into(), 1f32.into()];
+            let clear_values = vec![Some([0.0, 0.0, 0.0, 1.0].into()), Some(1f32.into())];
 
             let mut cmd_buffer_builder = AutoCommandBufferBuilder::primary(
-                device.clone(),
-                queue.family(),
+                &command_buffer_allocator,
+                queue.queue_family_index(),
                 vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
             )
             .unwrap();
 
             cmd_buffer_builder
                 .begin_render_pass(
-                    framebuffers[image_num].clone(),
+                    RenderPassBeginInfo {
+                        clear_values,
+                        ..RenderPassBeginInfo::framebuffer(
+                            framebuffers[image_index as usize].clone(),
+                        )
+                    },
                     vulkano::command_buffer::SubpassContents::Inline,
-                    clear_values,
                 )
                 .unwrap()
                 .set_viewport(0, [viewport.clone()])
@@ -377,7 +427,10 @@ fn main() {
                 .join(acquire_future)
                 .then_execute(queue.clone(), command_buffer)
                 .unwrap()
-                .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
+                .then_swapchain_present(
+                    queue.clone(),
+                    SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_index),
+                )
                 .then_signal_fence_and_flush();
 
             match future {
@@ -397,15 +450,16 @@ fn main() {
 }
 
 fn window_size_dependent_setup(
-    device: Arc<Device>,
-    images: &[Arc<SwapchainImage<Window>>],
+    standard_memory_allocator: &StandardMemoryAllocator,
+    images: &[Arc<SwapchainImage>],
     render_pass: Arc<RenderPass>,
     viewport: &mut Viewport,
 ) -> Vec<Arc<Framebuffer>> {
     let dimensions = images[0].dimensions().width_height();
     viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
     let depth_buffer = ImageView::new_default(
-        AttachmentImage::transient(device.clone(), dimensions, Format::D16_UNORM).unwrap(),
+        AttachmentImage::transient(standard_memory_allocator, dimensions, Format::D16_UNORM)
+            .unwrap(),
     )
     .unwrap();
 
@@ -425,10 +479,15 @@ fn window_size_dependent_setup(
         .collect::<Vec<_>>()
 }
 
-fn get_vertex_buffer(device: Arc<Device>) -> Arc<CpuAccessibleBuffer<[vertex::Vertex]>> {
+fn get_vertex_buffer(
+    memory_allocator: Arc<StandardMemoryAllocator>,
+) -> Arc<CpuAccessibleBuffer<[Vertex]>> {
     CpuAccessibleBuffer::from_iter(
-        device.clone(),
-        BufferUsage::all(),
+        &memory_allocator,
+        BufferUsage {
+            vertex_buffer: true,
+            ..BufferUsage::empty()
+        },
         false,
         [
             // front face
